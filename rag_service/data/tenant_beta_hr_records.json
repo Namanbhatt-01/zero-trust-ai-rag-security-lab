@@ -1,0 +1,18 @@
+[
+  {
+    "doc_id": "beta-hr-001",
+    "title": "Tenant Beta Executive Payroll & Compensation 2026",
+    "tenant_id": "tenant-beta",
+    "classification": "RESTRICTED",
+    "allowed_roles": ["hr-admin", "executive"],
+    "content": "Tenant Beta internal executive compensation records: CEO Base Salary $650,000 with 150% target incentive bonus. VP Engineering compensation $420,000 + 40,000 RSU equity grants vesting quarterly. Social Security and tax IDs are maintained in secure HR vault."
+  },
+  {
+    "doc_id": "beta-hr-002",
+    "title": "Tenant Beta Employee Performance & Restructuring Plan",
+    "tenant_id": "tenant-beta",
+    "classification": "CONFIDENTIAL",
+    "allowed_roles": ["hr-admin"],
+    "content": "Tenant Beta organization restructuring proposal: Planning 5% talent realignment across legacy infrastructure teams to expand GPU Platform Engineering headcount."
+  }
+]

@@ -1,0 +1,18 @@
+[
+  {
+    "doc_id": "pub-kb-001",
+    "title": "Public Cloud Platform SLA & Service Commitments",
+    "tenant_id": "public",
+    "classification": "PUBLIC",
+    "allowed_roles": ["*"],
+    "content": "Our Cloud Platform guarantees 99.99% multi-region API availability and sub-100ms latency SLAs for AI model inference gateway endpoints across hybrid data center nodes."
+  },
+  {
+    "doc_id": "pub-kb-002",
+    "title": "Public REST API Documentation & Rate Limiting",
+    "tenant_id": "public",
+    "classification": "PUBLIC",
+    "allowed_roles": ["*"],
+    "content": "Public API rate limits are enforced at 10,000 requests per minute per authenticated API key. Requests exceeding thresholds receive HTTP 429 Too Many Requests."
+  }
+]

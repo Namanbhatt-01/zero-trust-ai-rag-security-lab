@@ -1,0 +1,18 @@
+[
+  {
+    "doc_id": "alpha-fin-001",
+    "title": "Tenant Alpha Q4 2026 EBITDA & Financial Audit",
+    "tenant_id": "tenant-alpha",
+    "classification": "CONFIDENTIAL",
+    "allowed_roles": ["finance-admin", "auditor"],
+    "content": "Tenant Alpha confidential financial performance: Q4 EBITDA reached $42.8M with an operating margin of 31.4%. Primary corporate treasury account: JPMorgan Chase routing 021000021, account ending in 8832. PCI DSS compliance certification audit completed on September 15, 2026."
+  },
+  {
+    "doc_id": "alpha-fin-002",
+    "title": "Tenant Alpha Mergers & Acquisitions Target Assessment",
+    "tenant_id": "tenant-alpha",
+    "classification": "RESTRICTED",
+    "allowed_roles": ["executive"],
+    "content": "Project Falcon M&A strategy: Tenant Alpha is evaluating acquisition of AI edge computing firm ApexNetworks for $180M cash transaction. Projected deal closing date is Q1 2027."
+  }
+]

@@ -1,0 +1,53 @@
+name: Lab 5 - Zero Trust AI RAG Security CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  validate-rag-security:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Python Dependencies & Security Scanners
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Bandit SAST Security Audit
+        run: |
+          bash security_audit/bandit_scan.sh
+
+      - name: Start Zero-Trust RAG Container Stack
+        run: |
+          docker compose up -d --build
+
+      - name: Await Service Convergence
+        run: |
+          echo "Awaiting Qdrant and RAG Gateway health..."
+          for i in {1..30}; do
+            if curl -s http://localhost:6333/healthz >/dev/null 2>&1 && curl -s http://localhost:8000/health >/dev/null 2>&1; then
+              echo "Services are ready!"
+              break
+            fi
+            sleep 2
+          done
+
+      - name: Execute Adversarial Penetration Test Suite
+        run: |
+          python3 verify_rag_security.py
+
+      - name: Teardown Security Stack
+        if: always()
+        run: |
+          docker compose down -v --remove-orphans
