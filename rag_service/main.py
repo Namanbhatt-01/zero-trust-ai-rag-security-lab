@@ -86,7 +86,7 @@ class QueryRequest(BaseModel):
 def init_vector_collection():
     print(f"[*] Initializing Qdrant connection to {QDRANT_HOST}:{QDRANT_PORT}...")
     client = get_qdrant_client()
-    for _ in range(15):
+    for _ in range(30):
         try:
             collections = client.get_collections().collections
             exists = any(c.name == COLLECTION_NAME for c in collections)
@@ -101,6 +101,40 @@ def init_vector_collection():
         except Exception as e:
             print(f"[-] Awaiting Qdrant readiness ({e})...")
             time.sleep(1)
+
+    # Auto-index seed datasets from data directory
+    data_dir = "/app/data" if os.path.exists("/app/data") else "rag_service/data"
+    if os.path.exists(data_dir):
+        import glob
+        print(f"[*] Auto-indexing multi-tenant seed documents from {data_dir}...")
+        for fpath in glob.glob(f"{data_dir}/*.json"):
+            try:
+                with open(fpath, "r") as f:
+                    docs = json.load(f)
+                    points = []
+                    for i, doc in enumerate(docs):
+                        sanitized = sanitize_pii(doc.get("content", ""))
+                        if sanitized != doc.get("content", ""):
+                            metrics.pii_redactions_performed += 1
+                        vec = generate_embedding(doc.get("content", ""))
+                        pt_id = int(hashlib.sha256(f"{doc.get('tenant_id')}_{doc.get('doc_id')}_{i}".encode()).hexdigest()[:8], 16)
+                        points.append(models.PointStruct(
+                            id=pt_id,
+                            vector=vec,
+                            payload={
+                                "doc_id": doc.get("doc_id"),
+                                "title": doc.get("title"),
+                                "tenant_id": doc.get("tenant_id"),
+                                "classification": doc.get("classification"),
+                                "allowed_roles": doc.get("allowed_roles"),
+                                "content": sanitized
+                            }
+                        ))
+                    if points:
+                        client.upsert(collection_name=COLLECTION_NAME, points=points)
+                        print(f"  [+] Seeded {len(points)} documents from {fpath}")
+            except Exception as e:
+                print(f"[-] Seed error for {fpath}: {e}")
 
 @app.post("/api/v1/ingest")
 def ingest_documents(docs: List[IngestDoc], user: dict = Depends(authenticate_request)):
