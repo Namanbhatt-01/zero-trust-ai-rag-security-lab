@@ -3,13 +3,16 @@ import sys
 import json
 import time
 import hashlib
-import numpy as np
 from typing import List, Optional
 from fastapi import FastAPI, Header, HTTPException, Depends, status
 from pydantic import BaseModel
 from qdrant_client import QdrantClient
 from qdrant_client.http import models
-from guardrails import inspect_prompt_injection, sanitize_pii, validate_tenant_query
+
+from auth import Principal, IdentityProvider, StaticFixtureIdentityProvider
+from policy import Resource, PolicyGate, PolicyDecision
+from embeddings import EmbeddingProvider, DeterministicFixtureEmbedding
+from guardrails import inspect_prompt_injection, sanitize_pii
 
 QDRANT_HOST = os.getenv("QDRANT_HOST", "qdrant")
 QDRANT_PORT = int(os.getenv("QDRANT_PORT", "6333"))
@@ -19,8 +22,12 @@ VECTOR_DIM = 128
 app = FastAPI(
     title="Zero-Trust Multi-Tenant RAG Security Gateway",
     version="1.0.0",
-    description="Containerized secure RAG gateway enforcing RBAC vector metadata filtering, prompt injection defense, and PII masking."
+    description="Containerized secure RAG gateway enforcing RBAC vector metadata pre-filtering, prompt injection defense, and sanitized PII embeddings."
 )
+
+# Instantiate core architectural providers
+identity_provider: IdentityProvider = StaticFixtureIdentityProvider()
+embedding_provider: EmbeddingProvider = DeterministicFixtureEmbedding(vector_dim=VECTOR_DIM)
 
 # In-memory security telemetry metrics
 class SecurityMetrics:
@@ -36,24 +43,8 @@ metrics = SecurityMetrics()
 def get_qdrant_client() -> QdrantClient:
     return QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT, timeout=10)
 
-def generate_embedding(text: str) -> List[float]:
-    """Generates a deterministic 128-dimensional dense vector representation."""
-    h = hashlib.sha256(text.encode("utf-8")).digest()
-    np.random.seed(int.from_bytes(h[:4], "big"))
-    vec = np.random.normal(0.0, 1.0, VECTOR_DIM)
-    norm = np.linalg.norm(vec)
-    return (vec / norm).tolist() if norm > 0 else vec.tolist()
-
-# Mock Token Database for Enterprise Users
-VALID_TOKENS = {
-    "token-alpha-fin-admin": {"user_id": "alice@tenant-alpha.com", "tenant_id": "tenant-alpha", "role": "finance-admin"},
-    "token-alpha-exec": {"user_id": "bob@tenant-alpha.com", "tenant_id": "tenant-alpha", "role": "executive"},
-    "token-beta-hr-admin": {"user_id": "carol@tenant-beta.com", "tenant_id": "tenant-beta", "role": "hr-admin"},
-    "token-beta-employee": {"user_id": "david@tenant-beta.com", "tenant_id": "tenant-beta", "role": "staff"},
-    "token-public-user": {"user_id": "guest@external.com", "tenant_id": "guest-org", "role": "guest"}
-}
-
-def authenticate_request(authorization: Optional[str] = Header(None)):
+def authenticate_request(authorization: Optional[str] = Header(None)) -> Principal:
+    """Authenticates caller against the IdentityProvider interface."""
     if not authorization or not authorization.startswith("Bearer "):
         metrics.unauthenticated_attempts_blocked += 1
         raise HTTPException(
@@ -61,20 +52,21 @@ def authenticate_request(authorization: Optional[str] = Header(None)):
             detail="Authentication failed: Missing or malformed Bearer token."
         )
     token = authorization.split(" ")[1]
-    if token not in VALID_TOKENS:
+    principal = identity_provider.authenticate(token)
+    if not principal:
         metrics.unauthenticated_attempts_blocked += 1
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Authentication failed: Invalid or expired API credentials."
         )
-    return VALID_TOKENS[token]
+    return principal
 
 class IngestDoc(BaseModel):
     doc_id: str
     title: str
     tenant_id: str
-    classification: str
-    allowed_roles: List[str]
+    classification: str = "INTERNAL"
+    allowed_roles: List[str] = ["*"]
     content: str
 
 class QueryRequest(BaseModel):
@@ -113,10 +105,14 @@ def init_vector_collection():
                     docs = json.load(f)
                     points = []
                     for i, doc in enumerate(docs):
-                        sanitized = sanitize_pii(doc.get("content", ""))
-                        if sanitized != doc.get("content", ""):
+                        # Security Invariant: Raw content is sanitized BEFORE embedding!
+                        raw_content = doc.get("content", "")
+                        sanitized_content = sanitize_pii(raw_content)
+                        if sanitized_content != raw_content:
                             metrics.pii_redactions_performed += 1
-                        vec = generate_embedding(doc.get("content", ""))
+
+                        # Vector is computed strictly from sanitized text
+                        vec = embedding_provider.embed(sanitized_content)
                         pt_id = int(hashlib.sha256(f"{doc.get('tenant_id')}_{doc.get('doc_id')}_{i}".encode()).hexdigest()[:8], 16)
                         points.append(models.PointStruct(
                             id=pt_id,
@@ -127,7 +123,7 @@ def init_vector_collection():
                                 "tenant_id": doc.get("tenant_id"),
                                 "classification": doc.get("classification"),
                                 "allowed_roles": doc.get("allowed_roles"),
-                                "content": sanitized
+                                "content": sanitized_content
                             }
                         ))
                     if points:
@@ -137,24 +133,36 @@ def init_vector_collection():
                 print(f"[-] Seed error for {fpath}: {e}")
 
 @app.post("/api/v1/ingest")
-def ingest_documents(docs: List[IngestDoc], user: dict = Depends(authenticate_request)):
+def ingest_documents(docs: List[IngestDoc], principal: Principal = Depends(authenticate_request)):
     client = get_qdrant_client()
     points = []
-    
-    for i, doc in enumerate(docs):
-        # Enforce tenant data boundary on ingestion
-        if user["tenant_id"] != "tenant-alpha" and user["tenant_id"] != "tenant-beta" and user["role"] != "admin":
-            if doc.tenant_id != user["tenant_id"] and doc.tenant_id != "public":
-                metrics.cross_tenant_access_denied += 1
-                raise HTTPException(status_code=403, detail="Unauthorized: Cannot ingest data into another tenant space.")
 
+    for i, doc in enumerate(docs):
+        resource = Resource(
+            doc_id=doc.doc_id,
+            tenant_id=doc.tenant_id,
+            classification=doc.classification,
+            allowed_roles=doc.allowed_roles
+        )
+
+        # Policy Gate: Enforce ingestion boundary and writer privilege
+        decision = PolicyGate.can_ingest(principal, resource)
+        if not decision.allowed:
+            metrics.cross_tenant_access_denied += 1
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Authorization Violation [{decision.control_id}]: {decision.reason}"
+            )
+
+        # Ingestion Pipeline: PII detection -> Sanitization -> Embedding -> Vector DB
         sanitized_content = sanitize_pii(doc.content)
         if sanitized_content != doc.content:
             metrics.pii_redactions_performed += 1
 
-        vec = generate_embedding(doc.content)
+        # Embed SANITIZED text (never raw PII)
+        vec = embedding_provider.embed(sanitized_content)
         pt_id = int(hashlib.sha256(f"{doc.tenant_id}_{doc.doc_id}_{i}".encode()).hexdigest()[:8], 16)
-        
+
         points.append(models.PointStruct(
             id=pt_id,
             vector=vec,
@@ -169,38 +177,39 @@ def ingest_documents(docs: List[IngestDoc], user: dict = Depends(authenticate_re
         ))
 
     client.upsert(collection_name=COLLECTION_NAME, points=points)
-    return {"status": "INGESTED", "count": len(points)}
+    return {"status": "INGESTED", "count": len(points), "principal": principal.subject}
 
 @app.post("/api/v1/query")
-def secure_rag_query(req: QueryRequest, user: dict = Depends(authenticate_request)):
+def secure_rag_query(req: QueryRequest, principal: Principal = Depends(authenticate_request)):
     metrics.total_queries += 1
 
-    # 1. Guardrail Inspection: Adversarial Prompt Injection Defense
+    # Layer 1 & 2 Guardrails: Normalization & Prompt Injection Interception
     injection_check = inspect_prompt_injection(req.query)
     if not injection_check.is_safe:
         metrics.prompt_injections_blocked += 1
-        raise HTTPException(status_code=400, detail=injection_check.reason)
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=injection_check.reason)
 
-    # 2. Guardrail Inspection: Tenant Boundary Enforcement
-    tenant_check = validate_tenant_query(user["tenant_id"], req.target_tenant_hint)
-    if not tenant_check.is_safe:
+    # Layer 3 Guardrails: Tenant Boundary Validation via PolicyGate
+    query_policy = PolicyGate.can_query(principal, req.target_tenant_hint)
+    if not query_policy.allowed:
         metrics.cross_tenant_access_denied += 1
-        raise HTTPException(status_code=403, detail=tenant_check.reason)
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=query_policy.reason)
 
-    # 3. Vector Embedding & RBAC Payload Filtering in Qdrant
-    query_vector = generate_embedding(req.query)
+    # Layer 4 Guardrails: Vector Embedding & Atomic HNSW Predicate Pre-Filtering
+    query_vector = embedding_provider.embed(injection_check.sanitized_text)
     client = get_qdrant_client()
 
-    # Zero-Trust Metadata Filtering: Only retrieve chunks matching user's tenant OR public, AND user's role OR wildcard
+    # Invariant: Pre-filter strictly restricts search graph to Principal's tenant and assigned roles
+    role_matches = list(principal.roles) + ["*"]
     rbac_filter = models.Filter(
         must=[
             models.FieldCondition(
                 key="tenant_id",
-                match=models.MatchAny(any=[user["tenant_id"], "public"])
+                match=models.MatchAny(any=[principal.tenant_id, "public"])
             ),
             models.FieldCondition(
                 key="allowed_roles",
-                match=models.MatchAny(any=[user["role"], "*"])
+                match=models.MatchAny(any=role_matches)
             )
         ]
     )
@@ -215,19 +224,32 @@ def secure_rag_query(req: QueryRequest, user: dict = Depends(authenticate_reques
     retrieved_chunks = []
     for hit in results:
         payload = hit.payload or {}
-        retrieved_chunks.append({
-            "doc_id": payload.get("doc_id"),
-            "title": payload.get("title"),
-            "tenant_id": payload.get("tenant_id"),
-            "classification": payload.get("classification"),
-            "similarity_score": round(hit.score, 4),
-            "content": payload.get("content")
-        })
+        chunk_resource = Resource(
+            doc_id=payload.get("doc_id", ""),
+            tenant_id=payload.get("tenant_id", ""),
+            classification=payload.get("classification", "INTERNAL"),
+            allowed_roles=payload.get("allowed_roles", ["*"])
+        )
+
+        # Defense-in-depth: Double-check clearance level post-retrieval
+        if PolicyGate.is_chunk_authorized(principal, chunk_resource):
+            retrieved_chunks.append({
+                "doc_id": payload.get("doc_id"),
+                "title": payload.get("title"),
+                "tenant_id": payload.get("tenant_id"),
+                "classification": payload.get("classification"),
+                "allowed_roles": payload.get("allowed_roles"),
+                "similarity_score": round(hit.score, 4),
+                "content": payload.get("content")
+            })
 
     return {
-        "user_id": user["user_id"],
-        "tenant_id": user["tenant_id"],
-        "role": user["role"],
+        "principal": {
+            "subject": principal.subject,
+            "tenant_id": principal.tenant_id,
+            "roles": list(principal.roles),
+            "clearance": principal.clearance
+        },
         "query": req.query,
         "retrieved_chunks_count": len(retrieved_chunks),
         "results": retrieved_chunks

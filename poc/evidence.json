@@ -1,0 +1,67 @@
+{
+  "schema_version": "1.0",
+  "experiment": {
+    "id": "rag-security-001",
+    "name": "Zero-Trust Retrieval Isolation and Policy Invariants"
+  },
+  "execution": {
+    "run_id": "rag-20260929-125352",
+    "timestamp": "2026-09-29T12:53:52.061986Z",
+    "environment": "docker-compose",
+    "platform": "darwin-arm64",
+    "service_url": "http://localhost:8000"
+  },
+  "measurements": [
+    {
+      "metric": "cross_tenant_chunks_leaked",
+      "value": 0,
+      "target": 0,
+      "mode": "measured"
+    },
+    {
+      "metric": "unauthorized_role_chunks_leaked",
+      "value": 0,
+      "target": 0,
+      "mode": "measured"
+    }
+  ],
+  "assertions": [
+    {
+      "id": "RAG-SEC-001",
+      "name": "Cross-Tenant Vector Isolation Invariant",
+      "passed": true,
+      "detail": "Retrieved 2 chunks with 0 foreign tenant leakage."
+    },
+    {
+      "id": "RAG-SEC-002",
+      "name": "RBAC Role & Clearance Invariant",
+      "passed": true,
+      "detail": "0 restricted chunks returned to staff role."
+    },
+    {
+      "id": "RAG-SEC-003",
+      "name": "Ingestion Boundary Authorization Invariant",
+      "passed": true,
+      "detail": "Cross-tenant write attempt denied with HTTP 403."
+    },
+    {
+      "id": "RAG-SEC-004",
+      "name": "PII Vector Storage Exclusion Invariant",
+      "passed": true,
+      "detail": "Raw PII sanitized before embedding; redaction token verified."
+    },
+    {
+      "id": "RAG-SEC-005",
+      "name": "Prompt Injection Defense Invariant",
+      "passed": true,
+      "detail": "Adversarial override directive blocked with HTTP 400."
+    },
+    {
+      "id": "RAG-SEC-006",
+      "name": "Authentication Boundary Invariant",
+      "passed": true,
+      "detail": "Missing tokens rejected with 401; forged tokens rejected with 403."
+    }
+  ],
+  "result": "passed"
+}
